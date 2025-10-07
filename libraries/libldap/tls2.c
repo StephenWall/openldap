@@ -563,7 +563,8 @@ ldap_pvt_tls_check_hostname( LDAP *ld, void *s, const char *name_in )
 	tls_session *session = s;
 
 	if (ld->ld_options.ldo_tls_require_cert != LDAP_OPT_X_TLS_NEVER &&
-	    ld->ld_options.ldo_tls_require_cert != LDAP_OPT_X_TLS_ALLOW) {
+	    ld->ld_options.ldo_tls_require_cert != LDAP_OPT_X_TLS_ALLOW &&
+	    ld->ld_options.ldo_tls_cert_name_check) {
 		ld->ld_errno = tls_imp->ti_session_chkhost( ld, session, name_in );
 		if (ld->ld_errno != LDAP_SUCCESS) {
 			return ld->ld_errno;
@@ -601,6 +602,7 @@ ldap_pvt_tls_config( LDAP *ld, int option, const char *arg )
 	case LDAP_OPT_X_TLS_PEERKEY_HASH:
 	case LDAP_OPT_X_TLS_ECNAME:
 	case LDAP_OPT_X_TLS_CRLFILE:	/* GnuTLS only */
+	case LDAP_OPT_X_TLS_CERT_NAME_CHECK:
 		return ldap_pvt_tls_set_option( ld, option, (void *) arg );
 
 	case LDAP_OPT_X_TLS_REQUIRE_CERT:
@@ -744,6 +746,9 @@ ldap_pvt_tls_get_option( LDAP *ld, int option, void *arg )
 		*(int *)arg = lo->ldo_tls_crlcheck;
 		break;
 #endif
+	case LDAP_OPT_X_TLS_CERT_NAME_CHECK:
+		*(int *)arg = lo->ldo_tls_cert_name_check;
+		break;
 	case LDAP_OPT_X_TLS_CIPHER_SUITE:
 		*(char **)arg = lo->ldo_tls_ciphersuite ?
 			LDAP_STRDUP( lo->ldo_tls_ciphersuite ) : NULL;
@@ -984,6 +989,10 @@ ldap_pvt_tls_set_option( LDAP *ld, int option, void *arg )
 	case LDAP_OPT_X_TLS_PROTOCOL_MAX:
 		if ( !arg ) return -1;
 		lo->ldo_tls_protocol_max = *(int *)arg;
+		return 0;
+	case LDAP_OPT_X_TLS_CERT_NAME_CHECK:
+		if ( !arg ) return -1;
+		lo->ldo_tls_cert_name_check = *(int *)arg ? 1 : 0;
 		return 0;
 	case LDAP_OPT_X_TLS_RANDOM_FILE:
 		if ( ld != NULL )
