@@ -1558,6 +1558,348 @@ tlso_info_cb( const SSL *ssl, int where, int ret )
 #endif
 }
 
+#define ssl_log( level, msg )						\
+	{								\
+		unsigned long error_code = ERR_get_error();		\
+		char *errstr = error_code ?				\
+			ERR_error_string( error_code, NULL ) :		\
+			NULL;						\
+		int error_string_length = errstr ?			\
+			strlen( errstr ) : 0;				\
+		if ( error_string_length ) {				\
+			syslog( level, msg ": %s", errstr );		\
+		} else {						\
+			syslog( level, msg );				\
+		}							\
+	}
+
+#define ssl_logv( level, msg, ... )					\
+	{								\
+		unsigned long error_code = ERR_get_error();		\
+		char *errstr = error_code ?				\
+			ERR_error_string( error_code, NULL ) :		\
+			NULL;						\
+		int error_string_length = errstr ?			\
+			strlen( errstr ) : 0;				\
+		if ( error_string_length ) {				\
+			syslog( level, msg ": %s", __VA_ARGS__, errstr );\
+		} else {						\
+			syslog( level, msg, __VA_ARGS__ );		\
+		}							\
+	}
+
+static int tlso_ocsp_verify(int preverify_ok, X509_STORE_CTX *ctx,
+			    struct ldapoptions *lo) {
+	SSL *ssl = (SSL *)X509_STORE_CTX_get_ex_data( 
+			ctx, SSL_get_ex_data_X509_STORE_CTX_idx() );
+	X509 *x509 = NULL;
+	char *url;
+	STACK_OF(OPENSSL_STRING) *aia = NULL;
+	char *host = NULL;
+	char *port = NULL;
+	char *path = NULL;
+	int use_ssl = 0;
+	OCSP_REQUEST *req = NULL;
+	STACK_OF(X509) * chain;
+	int depth;
+	OCSP_CERTID *cert_id = NULL;
+	X509 *issuer;
+	BIO *bio = NULL;
+	SSL_CTX *sctx = NULL;
+	int rv;
+	int fd;
+	fd_set confds;
+	struct timeval tv;
+	OCSP_REQ_CTX *req_ctx = NULL;
+	OCSP_RESPONSE *resp = NULL;
+	fd_set *readfds;
+	fd_set *writefds;
+	OCSP_BASICRESP *basic = NULL;
+	int ocsp_status = V_OCSP_CERTSTATUS_UNKNOWN;
+	int reason;
+	ASN1_GENERALIZEDTIME *revoked_at;
+	ASN1_GENERALIZEDTIME *this_update;
+	ASN1_GENERALIZEDTIME *next_update;
+	char *nm;
+
+	if ( !preverify_ok  ) {
+		/* Nothing to free, no x509 value, use quick end. */
+		goto end;
+	}
+
+	if ( ssl == NULL  ) {
+		syslog( LOG_WARNING, "tlso_ocsp_verify: can't find SSL context" );
+		/* Nothing to free, no x509 value, use quick end. */
+		goto end;
+	}
+
+	x509 = X509_STORE_CTX_get_current_cert( ctx );
+
+	if ( x509 == NULL ) {
+		ssl_log( LOG_WARNING,
+			 "tlso_ocsp_verify: can't retrieve certificate, continuing anyways" );
+		/* Nothing to free, no x509 value, use quick end. */
+		goto end;
+	}
+
+	if ( !lo->ldo_tls_ocsp_check ) {
+		syslog( LOG_INFO, "tlso_ocsp_verify: OCSP is disabled" );
+		/* Nothing to free, no OCSP status message needed, use quick end. */
+		goto end;
+	}
+
+	if ( !X509_NAME_cmp( X509_get_subject_name( x509 ), X509_get_issuer_name( x509 ) ) ) {
+		/* Self-signed, don't do OCSP. */
+		syslog( LOG_WARNING, "tlso_ocsp_verify: cert is self-signed, no OCSP done" );
+		/* Nothing to free, but message wanted, don't use quick end */
+		goto done;
+	}
+
+	/* This code may allocate storage for aia, do not use quick end beyond this
+	 * point. */
+	if ( lo->ldo_tls_ocsp_aia_override ) {
+		url = lo->ldo_tls_ocsp_responder;
+		if ( url == NULL || *url == '\0' ) {
+			STACK_OF(OPENSSL_STRING) *aia = X509_get1_ocsp( x509 );
+			url = sk_OPENSSL_STRING_value( aia, 0 );
+		}
+	} else {
+		STACK_OF(OPENSSL_STRING) *aia = X509_get1_ocsp( x509 );
+		url = sk_OPENSSL_STRING_value( aia, 0 );
+		if ( url == NULL || *url == '\0' ) {
+			url = lo->ldo_tls_ocsp_responder;
+		}
+	}
+	if ( url == NULL || *url == '\0' ) {
+		syslog( LOG_WARNING, "tlso_ocsp_verify: no responders found" );
+		goto done;
+	}
+
+	if ( OCSP_parse_url( url, &host, &port, &path, &use_ssl ) == 0 ) {
+		/* Error */
+		ssl_logv( LOG_WARNING, "tlso_ocsp_verify: Failure parsing responder URL: %s",
+			  url );
+		goto done;
+	}
+
+	if ( (req = OCSP_REQUEST_new()) == NULL ) {
+		/* Error */
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't create OCSP request" );
+		goto done;
+	}
+
+	chain = X509_STORE_CTX_get_chain( ctx );
+	depth = X509_STORE_CTX_get_error_depth( ctx );
+	if ( depth < sk_X509_num( chain ) - 1 ) { /* not the root CA cert */
+		++depth;                            /* index of the issuer cert */
+	}
+	issuer = sk_X509_value( chain, depth );
+
+	if ( (cert_id = OCSP_cert_to_id( NULL, x509, issuer )) == NULL ) {
+		/* Error */
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't create OCSP id" );
+		goto done;
+	}
+
+	if ( OCSP_request_add0_id( req, OCSP_CERTID_dup( cert_id ) ) == NULL ) {
+		/* Error */
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't add id to request" );
+		goto done;
+	}
+
+	if ( lo->ldo_tls_ocsp_nonce && !OCSP_request_add1_nonce( req, NULL, -1 ) ) {
+		/* Error */
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't add nonce to request" );
+		goto done;
+	}
+
+	if ( (bio = BIO_new_connect( host )) == NULL ) {
+		/* Error */
+		ssl_logv( LOG_WARNING, "tlso_ocsp_verify: can't connect to host %s", host );
+		goto done;
+	}
+	BIO_set_nbio( bio, 1 );
+	BIO_set_conn_port( bio, port );
+
+	if ( use_ssl ) {
+		sctx = SSL_CTX_new( SSLv23_client_method() );
+		if ( sctx == NULL ) {
+			ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't create SSL context" );
+			goto done;
+		}
+		SSL_CTX_set_mode( sctx, SSL_MODE_AUTO_RETRY );
+		BIO *sbio = BIO_new_ssl( sctx, 1 );
+		bio = BIO_push( sbio, bio );
+	}
+
+	rv = BIO_do_connect( bio );
+	if ( rv <= 0 && !BIO_should_retry( bio ) ) {
+		ssl_logv( LOG_WARNING, "tlso_ocsp_verify: can't connect to host %s", host );
+		goto done;
+	}
+
+	if ( BIO_get_fd( bio, &fd ) == -1 ) {
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't get connection descriptor" );
+		goto done;
+	}
+
+	if ( rv <= 0 ) {
+		FD_ZERO( &confds );
+		FD_SET( (unsigned int) fd, &confds );
+		tv.tv_usec = 0;
+		tv.tv_sec = 2;
+		rv = select( fd + 1, NULL, &confds, NULL, &tv );
+		if ( rv <= 0 ) {
+			/* Error or timeout */
+			syslog( LOG_WARNING, "tlso_ocsp_verify: connect failure" );
+			goto done;
+		}
+	}
+
+	if ( (req_ctx = OCSP_sendreq_new( bio, path, NULL, -1 )) == NULL ) {
+		/* Error */
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: failure creating request context" );
+		goto done;
+	}
+	/* add the HTTP Host header */
+	if ( !OCSP_REQ_CTX_add1_header( req_ctx, "Host", host ) ) {
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't add Host header to request" );
+		goto done;
+	}
+	/* add the remaining HTTP headers and the OCSP request body */
+	if ( !OCSP_REQ_CTX_set1_req( req_ctx, req ) ) {
+		ssl_log( LOG_WARNING,
+			 "tlso_ocsp_verify: can't add request ID to the request" );
+		goto done;
+	}
+
+	while ( (rv = OCSP_sendreq_nbio( &resp, req_ctx )) == -1 ) {
+		FD_ZERO( &confds );
+		FD_SET( (unsigned int) fd, &confds );
+		tv.tv_usec = 0;
+		tv.tv_sec = 1;
+
+		readfds = BIO_should_read( bio ) ? &confds : NULL;
+		writefds = BIO_should_write( bio ) ? &confds : NULL;
+		if ( readfds == NULL && writefds == NULL ) {
+			/* Error */
+			syslog( LOG_WARNING, "tlso_ocsp_verify: unexpected retry condition" );
+			goto done;
+		}
+		rv = select( fd + 1, readfds, writefds, NULL, &tv );
+
+		if ( rv == 0 ) {
+			/* Timeout */
+			syslog( LOG_WARNING, "tlso_ocsp_verify: timeout waiting on descriptor" );
+			goto done;
+		}
+		if ( rv < 0 ) {
+			/* Error */
+			syslog( LOG_WARNING, "tlso_ocsp_verify: error waiting on descriptor" );
+			goto done;
+		}
+	}
+
+	if ( rv != 1 ) {
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: error in OCSP_sendreq_nbio" );
+		goto done;
+	}
+
+	rv = OCSP_response_status( resp );
+	if ( rv != OCSP_RESPONSE_STATUS_SUCCESSFUL ) {
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: error in OCSP response" );
+		goto done;
+	}
+
+	basic = OCSP_response_get1_basic( resp );
+	if ( basic == NULL ) {
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: error parsing basic response" );
+		goto done;
+	}
+
+	if ( lo->ldo_tls_ocsp_nonce ) {
+		rv = OCSP_check_nonce( req, basic );
+		if ( rv == -1 ) {
+			ssl_log( LOG_WARNING, "tlso_ocsp_verify: missing nonce" );
+			goto done;
+		}
+		if ( rv <= 0 ) {
+			ssl_log( LOG_WARNING, "tlso_ocsp_verify: bad nonce" );
+			goto done;
+		}
+	}
+
+	rv = OCSP_basic_verify( basic, chain,
+				SSL_CTX_get_cert_store( SSL_get_SSL_CTX( ssl ) ), 0 );
+	if ( rv <= 0 ) {
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: can't verify basic response" );
+		goto done;
+	}
+
+	if ( !OCSP_resp_find_status( basic, cert_id, &ocsp_status, &reason, &revoked_at,
+				     &this_update, &next_update ) ) {
+		ssl_log( LOG_WARNING, "tlso_ocsp_verify: no status found in OCSP response" );
+		ocsp_status = V_OCSP_CERTSTATUS_UNKNOWN;
+		goto done;
+	}
+
+	/* allow 60 seconds of skew, no max age. */
+	if ( !OCSP_check_validity( this_update, next_update, 60, -1 ) ) {
+		ssl_log( LOG_WARNING,
+			 "tlso_ocsp_verify: OCSP response is expired, or not yet valid" );
+		ocsp_status = V_OCSP_CERTSTATUS_UNKNOWN;
+	}
+
+done:
+
+	nm = X509_NAME_oneline( X509_get_subject_name( x509 ), NULL, 0 );
+	switch ( ocsp_status ) {
+		case V_OCSP_CERTSTATUS_GOOD:
+			ssl_logv( LOG_INFO, "tlso_ocsp_verify: good OCSP status for %s", nm );
+			preverify_ok = 1;
+			break;
+		case V_OCSP_CERTSTATUS_REVOKED:
+			ssl_logv( LOG_WARNING, "tlso_ocsp_verify: certificate revoked: %s", nm );
+			preverify_ok = 0;
+			break;
+		case V_OCSP_CERTSTATUS_UNKNOWN:
+		default:
+			ssl_logv( LOG_WARNING,
+				  "tlso_ocsp_verify: OCSP status unknown for %s, continuing anyways",
+				  nm );
+			preverify_ok = 1;
+			break;
+	}
+	OPENSSL_free( nm );
+
+	if ( aia != NULL )
+		X509_email_free( aia );
+	if ( host != NULL )
+		OPENSSL_free( host );
+	if ( port != NULL )
+		OPENSSL_free( port );
+	if ( path != NULL )
+		OPENSSL_free( path );
+	if ( req != NULL )
+		OCSP_REQUEST_free( req );
+	if ( cert_id != NULL )
+		OCSP_CERTID_free( cert_id );
+	if ( bio != NULL )
+		BIO_free_all( bio );
+	if ( sctx != NULL )
+		SSL_CTX_free( sctx );
+	if ( req_ctx != NULL )
+		OCSP_REQ_CTX_free( req_ctx );
+	if ( resp != NULL )
+		OCSP_RESPONSE_free( resp );
+	if ( basic != NULL )
+		OCSP_BASICRESP_free( basic );
+
+end:
+
+	return preverify_ok;
+}
+
 static int
 tlso_verify_cb( int ok, X509_STORE_CTX *ctx )
 {
@@ -1609,6 +1951,10 @@ tlso_verify_cb( int ok, X509_STORE_CTX *ctx )
 #ifdef HAVE_EBCDIC
 	if ( certerr ) LDAP_FREE( certerr );
 #endif
+	lo = LDAP_INT_GLOBAL_OPT();
+	if ( lo->ldo_tls_ocsp_check ) {
+		ok = tlso_ocsp_verify( ok, ctx, lo );
+	}
 	return ok;
 }
 

@@ -182,6 +182,10 @@ struct ldaptls {
 	char		*lt_crlfile;
 	char		*lt_randfile;	/* OpenSSL only */
 	char		*lt_ecname;		/* OpenSSL only */
+	char		*lt_ocsp_responder;	/* OpenSSL only */
+	int		lt_ocsp_check;	/* OpenSSL only */
+	int		lt_ocsp_aia_override;	/* OpenSSL only */
+	int		lt_ocsp_nonce;	/* OpenSSL only */
 	int		lt_protocol_min;
 	int		lt_protocol_max;
 	struct berval	lt_cacert;
@@ -303,6 +307,10 @@ struct ldapoptions {
 #define ldo_tls_cacertfile	ldo_tls_info.lt_cacertfile
 #define ldo_tls_cacertdir	ldo_tls_info.lt_cacertdir
 #define ldo_tls_ciphersuite	ldo_tls_info.lt_ciphersuite
+#define ldo_tls_ocsp_responder	ldo_tls_info.lt_ocsp_responder
+#define ldo_tls_ocsp_check	ldo_tls_info.lt_ocsp_check
+#define ldo_tls_ocsp_aia_override	ldo_tls_info.lt_ocsp_aia_override
+#define ldo_tls_ocsp_nonce	ldo_tls_info.lt_ocsp_nonce
 #define ldo_tls_protocol_min	ldo_tls_info.lt_protocol_min
 #define ldo_tls_protocol_max	ldo_tls_info.lt_protocol_max
 #define ldo_tls_crlfile	ldo_tls_info.lt_crlfile
@@ -317,7 +325,7 @@ struct ldapoptions {
 	int			ldo_tls_require_san;
 	char		*ldo_tls_pin_hashalg;
 	struct berval	ldo_tls_pin;
-#define LDAP_LDO_TLS_NULLARG ,0,0,0,{0,0,0,0,0,0,0,0,0},0,0,0,0,0,0,{0,0}
+#define LDAP_LDO_TLS_NULLARG ,0,0,0,{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{0,0},{0,0},{0,0}},0,0,0,0,0,0,{0,0}
 #else
 #define LDAP_LDO_TLS_NULLARG
 #endif
