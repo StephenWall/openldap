@@ -663,6 +663,11 @@ ldap_pvt_tls_config( LDAP *ld, int option, const char *arg )
 			return ldap_pvt_tls_set_option( ld, option, &i );
 		}
 		return -1;
+	case LDAP_OPT_X_TLS_OCSP_CHECK:	/* OpenSSL only */
+	case LDAP_OPT_X_TLS_OCSP_AIA_OVERRIDE:	/* OpenSSL only */
+	case LDAP_OPT_X_TLS_OCSP_NONCE:	/* OpenSSL only */
+	case LDAP_OPT_X_TLS_OCSP_RESPONDER:	/* OpenSSL only */
+		return ldap_pvt_tls_set_option( ld, option, (void *) arg );
 #endif
 	}
 	return -1;
@@ -742,6 +747,19 @@ ldap_pvt_tls_get_option( LDAP *ld, int option, void *arg )
 #ifdef HAVE_OPENSSL
 	case LDAP_OPT_X_TLS_CRLCHECK:	/* OpenSSL only */
 		*(int *)arg = lo->ldo_tls_crlcheck;
+		break;
+	case LDAP_OPT_X_TLS_OCSP_CHECK:	/* OpenSSL only */
+		*(int *)arg = lo->ldo_tls_ocsp_check;
+		break;
+	case LDAP_OPT_X_TLS_OCSP_AIA_OVERRIDE:	/* OpenSSL only */
+		*(int *)arg = lo->ldo_tls_ocsp_aia_override;
+		break;
+	case LDAP_OPT_X_TLS_OCSP_NONCE:	/* OpenSSL only */
+		*(int *)arg = lo->ldo_tls_ocsp_nonce;
+		break;
+	case LDAP_OPT_X_TLS_OCSP_RESPONDER:	/* OpenSSL only */
+		*(char **)arg = lo->ldo_tls_ocsp_responder ?
+			LDAP_STRDUP( lo->ldo_tls_ocsp_responder ) : NULL;
 		break;
 #endif
 	case LDAP_OPT_X_TLS_CIPHER_SUITE:
@@ -971,6 +989,22 @@ ldap_pvt_tls_set_option( LDAP *ld, int option, void *arg )
 			return 0;
 		}
 		return -1;
+	case LDAP_OPT_X_TLS_OCSP_CHECK:	/* OpenSSL only */
+		if ( !arg ) return -1;
+		lo->ldo_tls_ocsp_check = *(int *)arg ? 1 : 0;
+		return 0;
+	case LDAP_OPT_X_TLS_OCSP_AIA_OVERRIDE:	/* OpenSSL only */
+		if ( !arg ) return -1;
+		lo->ldo_tls_ocsp_aia_override = *(int *)arg ? 1 : 0;
+		return 0;
+	case LDAP_OPT_X_TLS_OCSP_NONCE:	/* OpenSSL only */
+		if ( !arg ) return -1;
+		lo->ldo_tls_ocsp_nonce = *(int *)arg ? 1 : 0;
+		return 0;
+	case LDAP_OPT_X_TLS_OCSP_RESPONDER:	/* OpenSSL only */
+		if ( lo->ldo_tls_ocsp_responder ) LDAP_FREE( lo->ldo_tls_ocsp_responder );
+		lo->ldo_tls_ocsp_responder = arg ? LDAP_STRDUP( (char *) arg ) : NULL;
+		return 0;
 #endif
 	case LDAP_OPT_X_TLS_CIPHER_SUITE:
 		if ( lo->ldo_tls_ciphersuite ) LDAP_FREE( lo->ldo_tls_ciphersuite );

@@ -157,6 +157,10 @@ enum {
 	CFG_TLS_VERIFY,
 	CFG_TLS_CRLCHECK,
 	CFG_TLS_CRL_FILE,
+	CFG_OCSP_CHECK,
+	CFG_OCSP_AIA_OVERRIDE,
+	CFG_OCSP_NONCE,
+	CFG_OCSP_RESPONDER,
 	CFG_CONCUR,
 	CFG_THREADS,
 	CFG_SALT,
@@ -926,6 +930,41 @@ static ConfigTable config_back_cf_table[] = {
 #endif
 		"( OLcfgGlAt:87 NAME 'olcTLSProtocolMin' "
 			"EQUALITY caseExactMatch "
+			"SYNTAX OMsDirectoryString SINGLE-VALUE )", NULL, NULL },
+	{ "OCSPCheck", "on|off", 2, 2, 0,
+#if defined(HAVE_TLS) && defined(HAVE_OPENSSL)
+		CFG_OCSP_CHECK|ARG_ON_OFF, &config_tls_option,
+#else
+		ARG_IGNORED, NULL,
+#endif
+		"( OLcfgGlAt:106 NAME 'olcOCSPCheck' "
+			"EQUALITY booleanMatch "
+			"SYNTAX OMsBoolean SINGLE-VALUE )", NULL, NULL },
+	{ "OCSPAIAOverride", "on|off", 2, 2, 0,
+#if defined(HAVE_TLS) && defined(HAVE_OPENSSL)
+		CFG_OCSP_AIA_OVERRIDE|ARG_ON_OFF, &config_tls_option,
+#else
+		ARG_IGNORED, NULL,
+#endif
+		"( OLcfgGlAt:107 NAME 'olcOCSPAIAOverride' "
+			"EQUALITY booleanMatch "
+			"SYNTAX OMsBoolean SINGLE-VALUE )", NULL, NULL },
+	{ "OCSPNonce", "on|off", 2, 2, 0,
+#if defined(HAVE_TLS) && defined(HAVE_OPENSSL)
+		CFG_OCSP_NONCE|ARG_ON_OFF, &config_tls_option,
+#else
+		ARG_IGNORED, NULL,
+#endif
+		"( OLcfgGlAt:108 NAME 'olcOCSPNonce' "
+			"EQUALITY booleanMatch "
+			"SYNTAX OMsBoolean SINGLE-VALUE )", NULL, NULL },
+	{ "OCSPResponder", NULL, 2, 2, 0,
+#if defined(HAVE_TLS) && defined(HAVE_OPENSSL)
+		CFG_OCSP_RESPONDER|ARG_STRING|ARG_MAGIC, &config_tls_option,
+#else
+		ARG_IGNORED, NULL,
+#endif
+		"( OLcfgGlAt:109 NAME 'olcOCSPResponder' "
 			"SYNTAX OMsDirectoryString SINGLE-VALUE )", NULL, NULL },
 	{ "tool-threads", "count", 2, 2, 0, ARG_INT|ARG_MAGIC|CFG_TTHREADS,
 		&config_generic, "( OLcfgGlAt:80 NAME 'olcToolThreads' "
@@ -4130,6 +4169,12 @@ config_tls_option(ConfigArgs *c) {
 	case CFG_TLS_ECNAME:	flag = LDAP_OPT_X_TLS_ECNAME;	break;
 #ifdef HAVE_GNUTLS
 	case CFG_TLS_CRL_FILE:	flag = LDAP_OPT_X_TLS_CRLFILE;	break;
+#endif
+#ifdef HAVE_OPENSSL
+        case CFG_OCSP_CHECK:	flag = LDAP_OPT_X_TLS_OCSP_CHECK;	break;
+        case CFG_OCSP_AIA_OVERRIDE:	flag = LDAP_OPT_X_TLS_OCSP_AIA_OVERRIDE;	break;
+        case CFG_OCSP_NONCE:	flag = LDAP_OPT_X_TLS_OCSP_NONCE;	break;
+        case CFG_OCSP_RESPONDER:	flag = LDAP_OPT_X_TLS_OCSP_RESPONDER;	break;
 #endif
 	case CFG_TLS_CACERT:	flag = LDAP_OPT_X_TLS_CACERT;	berval = 1;	break;
 	case CFG_TLS_CERT:		flag = LDAP_OPT_X_TLS_CERT;	berval = 1;	break;
